@@ -1,0 +1,147 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+// === LCD 16x2 I2C setup ===
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// === Pins ===
+const byte load_pin = A0;    // Battery voltage measurement
+const byte relay_pin = 13;  // Relay control (connects/disconnects load)
+const byte buzz_pin = 5;    // Buzzer
+const byte butt_pin = 11;   // START button
+
+// === Test parameters ===
+float Voff = 3.0;      // Cutoff voltage for Li-ion
+float R = 7.40;        // Actual load resistance in Ohms
+float typVbg = 1.095;  // Internal ADC reference voltage
+
+// === Working variables ===
+float V = 0;    // Battery voltage
+float I = 0;    // Load current
+float Vcc = 0;  // Arduino supply voltage
+float cap = 0;  // Capacity in mAh
+float Wh = 0;   // Capacity in Wh
+
+unsigned long prevMillis = 0;
+unsigned long testStart = 0;
+
+#define NUM_READS 10  // Number of samples for ADC smoothing
+
+
+
+// =========================== SETUP =========================
+void setup() {
+
+  pinMode(relay_pin, OUTPUT);
+  digitalWrite(relay_pin, LOW);  // Relay is OFF by default
+
+  pinMode(butt_pin, INPUT_PULLUP);  // Button connected to GND → pressed = LOW
+  pinMode(buzz_pin, OUTPUT);        // Buzzer output
+
+  // ==== LCD initialization ====
+  lcd.init();       // Initialize display
+  lcd.backlight();  // Turn on backlight
+  lcd.clear();      // Clear screen
+
+  lcd.setCursor(0, 0);           // Set cursor to column 0, row 0
+  lcd.print("Battery Tester");   // Display text
+  lcd.setCursor(0, 1);           // Set cursor to column 0, row 1
+  lcd.print("Press button...");  // Display text
+
+  // === Wait for button press ===
+  while (digitalRead(butt_pin) == HIGH) {
+    delay(20);
+  }
+
+  tone(buzz_pin, 300, 200);  // Short beep on test start (300 Hz, 200 ms)
+
+  lcd.clear();               // Clear screen
+  lcd.setCursor(0, 0);       // Set cursor to column 0, row 0
+  lcd.print("Test Started"); // Display text
+
+  Serial.begin(9600);
+
+  testStart = millis();
+  prevMillis = millis();
+
+  digitalWrite(relay_pin, HIGH);  // Enable load (turn relay ON)
+}
+
+// ============================ LOOP =========================
+void loop() {
+
+  // === Measure Vcc ===
+  Vcc = readVcc();
+
+  // === Battery voltage ===
+  V = (readAnalog(load_pin) * Vcc) / 1023.0;
+
+  // === Load current ===
+  I = V / R;
+
+  unsigned long now = millis();
+  float dt = (now - prevMillis) / 1000.0;
+  prevMillis = now;
+
+  // === Capacity calculations ===
+  cap += (I * 1000.0) * dt / 3600.0;  // mAh
+  Wh += (I * V) * dt / 3600.0;        // Wh
+
+  // === LCD output ===
+  lcd.setCursor(0, 0);
+  lcd.print("V=");
+  lcd.print(V, 2);
+  lcd.print(" I=");
+  lcd.print(I, 2);
+
+  lcd.setCursor(0, 1);
+  lcd.print("mAh=");
+  lcd.print(cap, 0);
+  lcd.print("   ");
+
+  // === CUTOFF CHECK ===
+  if (V < Voff) {
+    digitalWrite(relay_pin, LOW);  // Disable relay (remove load)
+
+    tone(buzz_pin, 500, 800);  // Long beep
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Test DONE!");
+    lcd.setCursor(0, 1);
+    lcd.print("mAh=");
+    lcd.print(cap, 0);
+
+    // Stop program execution
+    while (true) {
+      delay(1000);
+    }
+  }
+}
+
+// =============== ADC FILTER FUNCTION =======================
+
+float readAnalog(int pin) {
+  long sum = 0;
+  for (int i = 0; i < NUM_READS; i++) {
+    sum += analogRead(pin);
+    delay(2);
+  }
+  return sum / (float)NUM_READS;
+}
+
+// ==================== VCC MEASUREMENT ======================
+
+float readVcc() {
+  ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+  delay(2);
+  ADCSRA |= _BV(ADSC);
+  while (bit_is_set(ADCSRA, ADSC))
+    ;
+
+  uint8_t low = ADCL;
+  uint8_t high = ADCH;
+  long result = (high << 8) | low;
+
+  return (typVbg * 1023.0) / result;
+}
